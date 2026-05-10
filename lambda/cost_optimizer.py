@@ -71,6 +71,99 @@ def get_unused_s3_buckets():
         print(f"Error scanning S3: {e}")
     return findings
 
+def get_unattached_ebs_volumes():
+    findings = []
+    response = ec2.describe_volumes(
+        Filters=[{'Name': 'status', 'Values': ['available']}]
+    )
+    for volume in response['Volumes']:
+        name = 'Unnamed'
+        if 'Tags' in volume:
+            for tag in volume['Tags']:
+                if tag['Key'] == 'Name':
+                    name = tag['Value']
+        findings.append({
+            'resource': 'EBS Volume',
+            'id': f"{volume['VolumeId']} ({name})",
+            'detail': f"Unattached volume — {volume['Size']}GB {volume['VolumeType']} still incurring charges",
+            'severity': 'HIGH'
+        })
+    return findings
+
+def get_old_ebs_snapshots():
+    findings = []
+    cutoff = datetime.utcnow() - timedelta(days=90)
+    response = ec2.describe_snapshots(OwnerIds=['self'])
+    
+    ami_snapshot_ids = set()
+    amis = ec2.describe_images(Owners=['self'])
+    for ami in amis['Images']:
+        for mapping in ami.get('BlockDeviceMappings', []):
+            if 'Ebs' in mapping and 'SnapshotId' in mapping['Ebs']:
+                ami_snapshot_ids.add(mapping['Ebs']['SnapshotId'])
+    
+    for snapshot in response['Snapshots']:
+        start_time = snapshot['StartTime'].replace(tzinfo=None)
+        if start_time < cutoff and snapshot['SnapshotId'] not in ami_snapshot_ids:
+            age_days = (datetime.utcnow() - start_time).days
+            findings.append({
+                'resource': 'EBS Snapshot',
+                'id': snapshot['SnapshotId'],
+                'detail': f"Snapshot {age_days} days old — not attached to any AMI",
+                'severity': 'LOW'
+            })
+    return findings
+
+def get_open_security_groups():
+    findings = []
+    response = ec2.describe_security_groups()
+    allowed_ports = {80, 443}
+    
+    for sg in response['SecurityGroups']:
+        for rule in sg.get('IpPermissions', []):
+            from_port = rule.get('FromPort', 0)
+            to_port = rule.get('ToPort', 0)
+            for ip_range in rule.get('IpRanges', []):
+                if ip_range.get('CidrIp') == '0.0.0.0/0':
+                    if from_port not in allowed_ports and to_port not in allowed_ports:
+                        findings.append({
+                            'resource': 'Security Group',
+                            'id': f"{sg['GroupId']} ({sg['GroupName']})",
+                            'detail': f"Unrestricted inbound access on port {from_port}-{to_port} from 0.0.0.0/0",
+                            'severity': 'HIGH'
+                        })
+    return findings
+
+def get_inactive_iam_users():
+    findings = []
+    iam = boto3.client('iam', region_name='us-east-1')
+    cutoff = datetime.utcnow() - timedelta(days=90)
+    
+    response = iam.list_users()
+    for user in response['Users']:
+        username = user['UserName']
+        try:
+            login_profile = iam.get_login_profile(UserName=username)
+            last_used = user.get('PasswordLastUsed')
+            if last_used is None:
+                findings.append({
+                    'resource': 'IAM User',
+                    'id': username,
+                    'detail': 'Console access enabled but never logged in',
+                    'severity': 'MEDIUM'
+                })
+            elif last_used.replace(tzinfo=None) < cutoff:
+                days_inactive = (datetime.utcnow() - last_used.replace(tzinfo=None)).days
+                findings.append({
+                    'resource': 'IAM User',
+                    'id': username,
+                    'detail': f"No console login in {days_inactive} days",
+                    'severity': 'MEDIUM'
+                })
+        except iam.exceptions.NoSuchEntityException:
+            pass
+    return findings
+
 def get_cost_breakdown():
     end = datetime.utcnow().strftime('%Y-%m-%d')
     start = datetime.utcnow().replace(day=1).strftime('%Y-%m-%d')
@@ -229,6 +322,10 @@ def lambda_handler(event, context):
     findings.extend(get_unattached_eips())
     findings.extend(get_stopped_instances())
     findings.extend(get_unused_s3_buckets())
+    findings.extend(get_unattached_ebs_volumes())
+    findings.extend(get_old_ebs_snapshots())
+    findings.extend(get_open_security_groups())
+    findings.extend(get_inactive_iam_users())
 
     services, total_cost = get_cost_breakdown()
 

@@ -38,7 +38,13 @@ resource "aws_iam_role_policy" "lambda_policy" {
           "logs:PutLogEvents",
           "logs:PutLogEvents",
           "ses:SendEmail",
-          "ses:SendRawEmail"
+          "ses:SendRawEmail",
+          "ec2:DescribeVolumes",
+          "ec2:DescribeSnapshots",
+          "ec2:DescribeImages",
+          "ec2:DescribeSecurityGroups",
+          "iam:ListUsers",
+          "iam:GetLoginProfile",
         ]
         Resource = "*"
       }
@@ -74,9 +80,9 @@ resource "aws_lambda_function" "cost_optimizer" {
 
 # EventBridge rule — runs daily at 8am UTC
 resource "aws_cloudwatch_event_rule" "daily_trigger" {
-  name                = "cost-optimizer-daily"
-  description         = "Triggers cost optimizer Lambda daily at 8am UTC"
-  schedule_expression = "cron(0 8 * * ? *)"
+  name                = "cost-optimizer-weekly"
+  description         = "Triggers cost optimizer Lambda weekly on Monday 8am"
+  schedule_expression = "cron(0 8 ? * MON *)"
 }
 
 # Connect EventBridge to Lambda
